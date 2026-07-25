@@ -14,7 +14,7 @@ const $$ = s => [...document.querySelectorAll(s)];
 const enc = encodeURIComponent;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
 // Backend function URL for online subtitles — get from dashboard → Code → Functions → searchSubtitles → Endpoint URL
-const SUB_API_URL='https://nxtv-googletv.netlify.app/.netlify/functions/searchSubtitles';
+const SUB_API_URL=';
 
 /* ---------- wordmark injection ---------- */
 function wordmark(el, size){
