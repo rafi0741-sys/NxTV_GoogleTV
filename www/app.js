@@ -13,8 +13,8 @@ const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const enc = encodeURIComponent;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
-// Backend function URL for online subtitles — get from dashboard → Code → Functions → searchSubtitles → Endpoint URL
-const SUB_API_URL='https://6a5ceee7fb0044b0c65d3d5d.deno.dev/searchSubtitles';
+// Sidecar subtitle blob URL (provider .srt/.vtt next to the video)
+let sidecarSubUrl=null;
 
 /* ---------- wordmark injection ---------- */
 function wordmark(el, size){
@@ -532,11 +532,12 @@ function playNext(){ const i=currentEpIndex(); if(i>=0&&i<episodeList.length-1){
 $('#pNext').addEventListener('click',playNext);
 
 function loadStream(url,live){
-  clearOnlineSubs(); $('#pCC').classList.remove('active');
+  clearSidecarSubs(); $('#pCC').classList.remove('active');
   const v=$('#video');
   if(hls){ hls.destroy(); hls=null; }
   v.pause(); v.removeAttribute('src'); v.load();
   isVod=!live;
+  if(!live) trySidecarSubs(url);
   aspectIdx=0; $('#vwrap').classList.remove('mode-zoom','mode-stretch'); const _ab=$('#pAspect'); if(_ab)_ab.textContent=ASPECT_MODES[0].label;
   const onErr=m=>{ const b=$('#buf'); if(b){ b.className='serr'; b.textContent=m; } };
   const onReady=()=>{ const b=$('#buf'); if(b)b.remove(); };
@@ -613,8 +614,6 @@ function openTrackPop(mode){
     if(mode==='audio'){ const cur=hls&&hls.audioTracks?hls.audioTrack:(video.audioTracks?[...video.audioTracks].findIndex(t=>t.enabled):0); if(cur===it.i)d.classList.add('sel'); }
     else { let act=-1; if(hls&&hls.subtitleTracks&&hls.subtitleTracks.length){act=hls.subtitleTrack;} else if(video.textTracks)for(let i=0;i<video.textTracks.length;i++)if(video.textTracks[i].mode==='showing')act=i; if(act===it.i)d.classList.add('sel'); }
     d.onclick=()=>{ selectTrack(mode,it.i); closeTrackPop(); }; list.appendChild(d); });
-  if(mode==='caps'){ const sep=document.createElement('div'); sep.className='tnone'; sep.style.cssText='border-top:1px solid var(--line);margin-top:6px;padding:6px 10px;text-align:center'; sep.textContent='— ONLINE —'; list.appendChild(sep);
-    const od=document.createElement('div'); od.className='titem foc'; od.textContent='🔍 Search OpenSubtitles'; od.onclick=()=>searchOnlineSubs(); list.appendChild(od); }
   pop.classList.add('show');
   setTimeout(()=>{ const f=list.querySelector('.titem'); if(f)setFocus(f); },50);
 }
@@ -622,39 +621,26 @@ function closeTrackPop(){ $('#tpop').classList.remove('show'); if($('#vwrap').cl
 function selectTrack(mode,idx){ const v=video;
   if(mode==='audio'){ if(hls&&hls.audioTracks&&hls.audioTracks.length)hls.audioTrack=idx; else if(v.audioTracks)for(let i=0;i<v.audioTracks.length;i++)v.audioTracks[i].enabled=(i===idx); }
   else { if(hls&&hls.subtitleTracks&&hls.subtitleTracks.length){hls.subtitleTrack=idx;} else if(v.textTracks)for(let i=0;i<v.textTracks.length;i++)v.textTracks[i].mode=(i===idx?'showing':'disabled'); $('#pCC').classList.toggle('active',idx>=0); } }
-/* ---- Online subtitles (OpenSubtitles via backend function) ---- */
-let onlineSubUrl=null;
-function clearOnlineSubs(){ if(onlineSubUrl){ URL.revokeObjectURL(onlineSubUrl); onlineSubUrl=null; } $$('#video track[data-online]').forEach(t=>t.remove()); }
-async function searchOnlineSubs(){
-  const list=$('#tpopList'); list.innerHTML='<div class="tnone">Searching OpenSubtitles…</div>';
-  try{
-    const r=await fetch(SUB_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'search',query:curItemName,language:'en'})});
-    if(!r.ok)throw new Error('Search failed ('+r.status+')');
-    const d=await r.json(); const results=d.results||[];
-    if(!results.length){ list.innerHTML='<div class="tnone">No subtitles found for "'+esc(curItemName)+'".</div>'; return; }
-    list.innerHTML='';
-    const hd=document.createElement('div'); hd.className='tnone'; hd.textContent='RESULTS FOR "'+esc(curItemName)+'"'; list.appendChild(hd);
-    results.forEach(it=>{ const el=document.createElement('div'); el.className='titem foc'; el.textContent=it.label; el.onclick=()=>downloadOnlineSub(it.file_id,it.label,it.language); list.appendChild(el); });
-    setTimeout(()=>{ const f=list.querySelector('.titem'); if(f)setFocus(f); },50);
-  }catch(e){ list.innerHTML='<div class="tnone">Error: '+esc(e.message)+'</div>'; }
-}
-async function downloadOnlineSub(fileId,label,lang){
-  const list=$('#tpopList'); list.innerHTML='<div class="tnone">Downloading subtitle…</div>';
-  try{
-    const r=await fetch(SUB_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'download',file_id:fileId})});
-    if(!r.ok)throw new Error('Download failed ('+r.status+')');
-    const d=await r.json();
-    clearOnlineSubs();
-    const blob=new Blob([d.vtt],{type:'text/vtt'}); onlineSubUrl=URL.createObjectURL(blob);
-    const v=$('#video');
-    if(hls&&hls.subtitleTracks&&hls.subtitleTracks.length)hls.subtitleTrack=-1;
-    if(v.textTracks)for(let i=0;i<v.textTracks.length;i++)if(v.textTracks[i].mode==='showing')v.textTracks[i].mode='disabled';
-    const tk=document.createElement('track'); tk.kind='subtitles'; tk.label=label||'Online'; tk.srclang=lang||'en'; tk.src=onlineSubUrl; tk.setAttribute('data-online','1'); v.appendChild(tk);
-    tk.addEventListener('load',()=>{ tk.track.mode='showing'; });
-    tk.track.mode='showing';
-    $('#pCC').classList.add('active');
-    closeTrackPop();
-  }catch(e){ list.innerHTML='<div class="tnone">Error: '+esc(e.message)+'</div>'; }
+/* ---- Sidecar subtitles (provider .srt/.vtt next to the video) ---- */
+function clearSidecarSubs(){ if(sidecarSubUrl){ URL.revokeObjectURL(sidecarSubUrl); sidecarSubUrl=null; } $$('#video track[data-sidecar]').forEach(t=>t.remove()); }
+function srtToVtt(s){ return 'WEBVTT\n\n'+s.replace(/\r/g,'').replace(/^\d+\n(?=\d{2}:)/gm,'').replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g,'$1.$2'); }
+async function trySidecarSubs(url){
+  const base=(url||'').replace(/\.[^./?]+(\?.*)?$/,'');
+  for(const ext of ['srt','vtt']){
+    const cand=base+'.'+ext;
+    try{
+      const r=await fetch(cand);
+      if(!r.ok) continue;
+      let text=await r.text();
+      if(!/^\s*(WEBVTT|\d+\s*\n\d{2}:|\d{2}:\d{2}:)/.test(text)) continue; // not a subtitle file
+      if(ext==='srt' || !/^\s*WEBVTT/.test(text)) text=srtToVtt(text);
+      clearSidecarSubs();
+      const blob=new Blob([text],{type:'text/vtt'}); sidecarSubUrl=URL.createObjectURL(blob);
+      const v=$('#video');
+      const tk=document.createElement('track'); tk.kind='subtitles'; tk.label='Provider'; tk.srclang='und'; tk.src=sidecarSubUrl; tk.setAttribute('data-sidecar','1'); v.appendChild(tk);
+      break;
+    }catch{}
+  }
 }
 $('#pAudio').addEventListener('click',()=>openTrackPop('audio'));
 $('#pCC').addEventListener('click',()=>openTrackPop('caps'));
