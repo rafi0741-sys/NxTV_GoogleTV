@@ -517,7 +517,7 @@ async function playSeries(c){
     const seasons=info.episodes||{}, keys=Object.keys(seasons);
     if(!keys.length)throw new Error('No episodes found.');
     episodeList=[];
-    keys.forEach(sk=>seasons[sk].forEach(e=>episodeList.push({id:String(e.id),label:'S'+sk+' · '+(e.title||('Ep '+e.episode_num)),url:`${CREDS.host}/series/${enc(CREDS.user)}/${enc(CREDS.pass)}/${e.id}.${e.container_extension||'mp4'}`})));
+    keys.forEach(sk=>seasons[sk].forEach(e=>episodeList.push({id:String(e.id),season:parseInt(sk,10)||0,episode:parseInt(e.episode_num,10)||0,label:'S'+sk+' · '+(e.title||('Ep '+e.episode_num)),url:`${CREDS.host}/series/${enc(CREDS.user)}/${enc(CREDS.pass)}/${e.id}.${e.container_extension||'mp4'}`})));
     let epHtml='<div class="nsub" style="margin-top:16px">Episodes</div><div class="eplist">';
     episodeList.forEach(ep=>{ epHtml+=`<div class="ep foc" data-ep="${esc(ep.id)}"><div class="noimg">▶</div><div class="meta"><div class="t">${esc(ep.label)}</div></div></div>`; });
     epHtml+='</div>';
@@ -532,7 +532,7 @@ function playNext(){ const i=currentEpIndex(); if(i>=0&&i<episodeList.length-1){
 $('#pNext').addEventListener('click',playNext);
 
 function loadStream(url,live){
-  clearSidecarSubs(); $('#pCC').classList.remove('active');
+  clearSidecarSubs(); clearOsSubs(); $('#pCC').classList.remove('active');
   const v=$('#video');
   if(hls){ hls.destroy(); hls=null; }
   v.pause(); v.removeAttribute('src'); v.load();
@@ -614,6 +614,7 @@ function openTrackPop(mode){
     if(mode==='audio'){ const cur=hls&&hls.audioTracks?hls.audioTrack:(video.audioTracks?[...video.audioTracks].findIndex(t=>t.enabled):0); if(cur===it.i)d.classList.add('sel'); }
     else { let act=-1; if(hls&&hls.subtitleTracks&&hls.subtitleTracks.length){act=hls.subtitleTrack;} else if(video.textTracks)for(let i=0;i<video.textTracks.length;i++)if(video.textTracks[i].mode==='showing')act=i; if(act===it.i)d.classList.add('sel'); }
     d.onclick=()=>{ selectTrack(mode,it.i); closeTrackPop(); }; list.appendChild(d); });
+  if(mode==='caps') osAppendMenu(list);
   pop.classList.add('show');
   setTimeout(()=>{ const f=list.querySelector('.titem'); if(f)setFocus(f); },50);
 }
@@ -642,6 +643,273 @@ async function trySidecarSubs(url){
     }catch{}
   }
 }
+
+/* =========================================================================
+   ONLINE SUBTITLES — OpenSubtitles REST API v1
+   Requests go through Capacitor's native HTTP plugin, so they are NOT subject
+   to the WebView's CORS rules and CAN send the User-Agent header the API
+   requires. On a plain browser (desktop testing) it falls back to fetch().
+   ========================================================================= */
+const OS_API = 'https://api.opensubtitles.com/api/v1';
+const OS_APP_UA = 'NXTV v1.1';
+// Replaced at build time by scripts/inject_key.py from the OPENSUBTITLES_API_KEY
+// repository secret. Left as the placeholder, online search just stays off.
+const OS_KEY_BUILTIN = '__OPENSUBTITLES_API_KEY__';
+const OS_LANGS = ['en','tl','es','fr','de','it','pt','id','zh-cn'];
+let osSubUrl = null;
+let osLastTransport = '';
+
+function osKey(){
+  const typed = (localStorage.getItem('nxtv_os_key')||'').trim();
+  if(typed) return typed;
+  // The build-time placeholder is full of underscores, so an un-injected build
+  // reads as "no key" instead of sending the placeholder to the API.
+  return /^[A-Za-z0-9]{16,}$/.test(OS_KEY_BUILTIN) ? OS_KEY_BUILTIN : '';
+}
+function osLang(){
+  const l = (localStorage.getItem('nxtv_os_lang')||'en').toLowerCase();
+  return OS_LANGS.includes(l) ? l : 'en';
+}
+function osCycleLang(){
+  const i = OS_LANGS.indexOf(osLang());
+  localStorage.setItem('nxtv_os_lang', OS_LANGS[(i+1)%OS_LANGS.length]);
+}
+
+/* ---- transport ---- */
+function osPlugin(){
+  const P = (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp) || window.CapacitorHttp;
+  return (P && typeof P.request === 'function') ? P : null;
+}
+async function osHttp(opts){
+  const P = osPlugin();
+  if(P){
+    osLastTransport = 'native';
+    const r = await P.request({
+      url: opts.url,
+      method: opts.method || 'GET',
+      headers: opts.headers || {},
+      data: opts.data,
+      responseType: 'text',
+      connectTimeout: 20000,
+      readTimeout: 30000
+    });
+    let body = r && r.data;
+    if(body == null) body = '';
+    else if(typeof body !== 'string'){ try{ body = JSON.stringify(body); }catch(e){ body = String(body); } }
+    return { status: (r && r.status)|0, text: body };
+  }
+  osLastTransport = 'web';
+  const r = await fetch(opts.url, {
+    method: opts.method || 'GET',
+    headers: opts.headers || {},
+    body: opts.data ? JSON.stringify(opts.data) : undefined
+  });
+  return { status: r.status, text: await r.text() };
+}
+function osJson(res){ try{ return JSON.parse(res.text); }catch(e){ return null; } }
+function osErrText(res){
+  const d = osJson(res);
+  let msg = 'HTTP ' + res.status;
+  if(d){
+    if(d.message) msg = d.message;
+    else if(Array.isArray(d.errors) && d.errors.length) msg = d.errors.join(', ');
+  }
+  if(res.status===401||res.status===403) msg += ' — check the API key';
+  if(res.status===406||res.status===429) msg += ' — daily download limit reached';
+  return msg;
+}
+function osHeaders(json){
+  const h = { 'Api-Key': osKey(), 'User-Agent': OS_APP_UA, 'Accept': 'application/json' };
+  if(json) h['Content-Type'] = 'application/json';
+  return h;
+}
+
+/* ---- what to search for ---- */
+const OS_JUNK = /\b(4k|uhd|fhd|hd|sd|hq|cam|ts|2160p|1080p?|720p?|480p|web-?dl|webrip|bluray|blu-ray|brrip|bdrip|hdrip|dvdrip|x264|x265|h264|h265|hevc|aac|ac3|eac3|dts|ddp5|5 1|multi|dual|dub|dubbed|subbed|remux|extended|uncut|imax|hdr|sdr)\b/gi;
+function osCleanTitle(raw){
+  let s = String(raw||'');
+  s = s.replace(/^\s*[A-Z0-9]{2,5}\s*[|:\-–]\s*/, '');     // provider prefix: "EN| Title", "VIP - Title"
+  s = s.replace(/\.(mp4|mkv|avi|m3u8|ts)$/i, '');
+  s = s.replace(/\[[^\]]*\]/g, ' ').replace(/\([^)]*\)/g, ' ');
+  s = s.replace(/\b(19|20)\d{2}\b[\s\S]*$/, ' ');            // cut at the year
+  s = s.replace(OS_JUNK, ' ');
+  s = s.replace(/[._]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  return s;
+}
+function osYear(raw){ const m = String(raw||'').match(/\b(19|20)\d{2}\b/); return m ? parseInt(m[0],10) : 0; }
+function osCurrentTarget(){
+  const q = osCleanTitle(curItemName);
+  const t = { query: q, year: osYear(curItemName), season: 0, episode: 0 };
+  const i = currentEpIndex();
+  if(i >= 0 && episodeList[i]){ t.season = episodeList[i].season||0; t.episode = episodeList[i].episode||0; }
+  return t;
+}
+
+/* ---- API calls ---- */
+async function osSearch(t){
+  if(!osKey()) throw new Error('No OpenSubtitles API key in this build.');
+  if(!t.query) throw new Error('Could not work out a title to search for.');
+  const p = new URLSearchParams({
+    query: t.query.toLowerCase(),
+    languages: osLang(),
+    order_by: 'download_count',
+    order_direction: 'desc'
+  });
+  if(t.season > 0) p.set('season_number', String(t.season));
+  if(t.episode > 0) p.set('episode_number', String(t.episode));
+  if(t.year > 0 && !t.season) p.set('year', String(t.year));
+  p.sort();   // the API redirects unless the parameters are sorted
+  const res = await osHttp({ url: OS_API + '/subtitles?' + p.toString().replace(/\+/g,'%20'), headers: osHeaders() });
+  if(res.status < 200 || res.status >= 300) throw new Error(osErrText(res));
+  const d = osJson(res);
+  if(!d) throw new Error('OpenSubtitles sent a reply the app could not read.');
+  const out = [];
+  (Array.isArray(d.data) ? d.data : []).forEach(it => {
+    const a = it && it.attributes; if(!a) return;
+    const f = Array.isArray(a.files) && a.files[0];
+    if(!f || !f.file_id) return;
+    out.push({
+      fileId: f.file_id,
+      name: a.release || (f.file_name||'') || 'Subtitle',
+      lang: (a.language||'').toUpperCase(),
+      downloads: a.download_count||0,
+      hearing: !!a.hearing_impaired
+    });
+  });
+  return out;
+}
+async function osDownload(fileId){
+  const res = await osHttp({
+    url: OS_API + '/download', method: 'POST', headers: osHeaders(true),
+    data: { file_id: fileId, sub_format: 'srt' }
+  });
+  if(res.status < 200 || res.status >= 300) throw new Error(osErrText(res));
+  const info = osJson(res) || {};
+  if(!info.link) throw new Error(info.message || 'No download link returned.');
+  let u; try{ u = new URL(info.link); }catch(e){ throw new Error('No usable download link returned.'); }
+  const host = u.hostname.toLowerCase();
+  const allowed = ['opensubtitles.com','oscdn.net'].some(d => host===d || host.endsWith('.'+d));
+  if(u.protocol !== 'https:' || !allowed) throw new Error('Unexpected download host: ' + host);
+  const file = await osHttp({ url: u.href });
+  if(file.status < 200 || file.status >= 300) throw new Error('Subtitle file download failed (HTTP ' + file.status + ').');
+  if(!file.text || file.text.length < 20) throw new Error('Subtitle file came back empty.');
+  return { text: file.text, name: info.file_name||'', remaining: (info.remaining==null?null:info.remaining) };
+}
+
+/* ---- attach to the video ---- */
+function clearOsSubs(){
+  if(osSubUrl){ URL.revokeObjectURL(osSubUrl); osSubUrl = null; }
+  $$('#video track[data-os]').forEach(t => t.remove());
+}
+function loadOsSubs(text, label){
+  clearOsSubs();
+  const vtt = /^\s*WEBVTT/.test(text) ? text : srtToVtt(text);
+  osSubUrl = URL.createObjectURL(new Blob([vtt], {type:'text/vtt'}));
+  const v = $('#video');
+  const tk = document.createElement('track');
+  tk.kind = 'subtitles';
+  // hls.js disables text tracks that carry a label, so stay unlabelled on HLS
+  tk.label = hls ? '' : (label || 'OpenSubtitles');
+  tk.srclang = 'und';
+  tk.setAttribute('data-os','1');
+  tk.src = osSubUrl;
+  v.appendChild(tk);
+  const show = () => {
+    try{
+      for(let i=0;i<v.textTracks.length;i++) v.textTracks[i].mode = 'disabled';
+      if(tk.track) tk.track.mode = 'showing';
+    }catch(e){}
+  };
+  tk.addEventListener('load', show, {once:true});
+  setTimeout(show, 250);
+  setTimeout(show, 1200);
+  $('#pCC').classList.add('active');
+}
+
+/* ---- the menu, drawn inside the existing subtitle popover ---- */
+function osNote(list, text, cls){
+  const d = document.createElement('div');
+  d.className = cls || 'tnone';
+  d.textContent = text;
+  list.appendChild(d);
+  return d;
+}
+function osItem(list, text, onPick){
+  const d = document.createElement('div');
+  d.className = 'titem foc';
+  d.textContent = text;
+  d.onclick = onPick;
+  list.appendChild(d);
+  return d;
+}
+function osRefocus(){
+  setTimeout(() => { const f = $('#tpopList .titem'); if(f) setFocus(f); }, 50);
+}
+function osAppendMenu(list){
+  const t = osCurrentTarget();
+  const sep = document.createElement('div');
+  sep.className = 'tpop-title';
+  sep.style.borderTop = '1px solid var(--line)';
+  sep.style.marginTop = '6px';
+  sep.textContent = 'Online';
+  list.appendChild(sep);
+  if(!osKey()){
+    osNote(list, 'No API key in this build — see the build step.');
+    return;
+  }
+  const what = t.season > 0 ? `${t.query} S${t.season}E${t.episode}` : (t.query || '—');
+  osItem(list, `🔍 Search “${what}”`, () => osRunSearch(t));
+  osItem(list, `🌐 Language: ${osLang().toUpperCase()}`, () => { osCycleLang(); openTrackPop('caps'); });
+}
+async function osRunSearch(t){
+  const list = $('#tpopList');
+  $('#tpopTitle').textContent = 'Online subtitles';
+  list.innerHTML = '';
+  osNote(list, 'Searching OpenSubtitles…');
+  let results;
+  try{
+    results = await osSearch(t);
+  }catch(err){
+    list.innerHTML = '';
+    osNote(list, 'Search failed: ' + (err && err.message ? err.message : String(err)));
+    osNote(list, 'via ' + (osLastTransport || 'unknown') + ' HTTP');
+    osItem(list, '↩ Back', () => openTrackPop('caps'));
+    osRefocus();
+    return;
+  }
+  list.innerHTML = '';
+  if(!results.length){
+    osNote(list, `Nothing found for “${t.query}” in ${osLang().toUpperCase()}.`);
+    osItem(list, '🌐 Try another language', () => { osCycleLang(); osRunSearch(t); });
+    osItem(list, '↩ Back', () => openTrackPop('caps'));
+    osRefocus();
+    return;
+  }
+  results.slice(0, 20).forEach(r => {
+    const tag = (r.hearing ? ' [SDH]' : '');
+    osItem(list, `${r.lang} · ${String(r.name).slice(0,46)}${tag}`, () => osPick(r));
+  });
+  osItem(list, '↩ Back', () => openTrackPop('caps'));
+  osRefocus();
+}
+async function osPick(r){
+  const list = $('#tpopList');
+  list.innerHTML = '';
+  osNote(list, 'Downloading subtitle…');
+  try{
+    const f = await osDownload(r.fileId);
+    loadOsSubs(f.text, r.lang ? ('OpenSubtitles ' + r.lang) : 'OpenSubtitles');
+    list.innerHTML = '';
+    osNote(list, 'Subtitles on' + (f.remaining!=null ? ` · ${f.remaining} downloads left today` : ''));
+    setTimeout(closeTrackPop, 1400);
+  }catch(err){
+    list.innerHTML = '';
+    osNote(list, 'Download failed: ' + (err && err.message ? err.message : String(err)));
+    osItem(list, '↩ Back', () => openTrackPop('caps'));
+    osRefocus();
+  }
+}
+
 $('#pAudio').addEventListener('click',()=>openTrackPop('audio'));
 $('#pCC').addEventListener('click',()=>openTrackPop('caps'));
 
