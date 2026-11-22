@@ -24,7 +24,6 @@ function wordmark(el, size){
   el.appendChild(mk('N','l'));
   const x=document.createElement('span'); x.className='x'; x.textContent='×'; el.appendChild(x);
   el.appendChild(rem);
-  el.appendChild(mk('T','l'));
   el.appendChild(mk('V','v'));
   const tm=document.createElement('span'); tm.className='tm'; tm.textContent='™'; el.appendChild(tm);
 }
