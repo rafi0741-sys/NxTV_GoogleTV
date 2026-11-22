@@ -157,8 +157,8 @@ function navFullscreen(dir){
   const inRow = btns.includes(cur);
 
   if(onScrub){
-    if(dir==='left'){ seek(-10); return; }
-    if(dir==='right'){ seek(10); return; }
+    if(dir==='left'){ nudgeSeek(-1); return; }
+    if(dir==='right'){ nudgeSeek(1); return; }
     if(dir==='up'){ setFocus($('#backBtn')); return; }
     if(dir==='down'){ setFocus(btns[0]); return; }
     return;
@@ -531,7 +531,7 @@ function playNext(){ const i=currentEpIndex(); if(i>=0&&i<episodeList.length-1){
 $('#pNext').addEventListener('click',playNext);
 
 function loadStream(url,live){
-  clearSidecarSubs(); clearOsSubs(); $('#pCC').classList.remove('active');
+  clearSidecarSubs(); clearOsSubs(); ffStop(false); cancelSeekPreview(); $('#pCC').classList.remove('active');
   const v=$('#video');
   if(hls){ hls.destroy(); hls=null; }
   v.pause(); v.removeAttribute('src'); v.load();
@@ -569,25 +569,139 @@ function showControls(){ const vw=$('#vwrap'); vw.classList.remove('hidebar'); c
 $('#vsurface').addEventListener('click',()=>{ if($('#video').src||hls) enterFs(); });
 $('#backBtn').addEventListener('click',()=>exitFs());
 
-function togglePlay(){ const v=$('#video'); if(v.paused)v.play().catch(()=>{}); else v.pause(); }
+function togglePlay(){ const v=$('#video'); if(ffActive()){ ffStop(true); return; } commitSeek(); if(v.paused)v.play().catch(()=>{}); else v.pause(); }
 $('#pPlay').addEventListener('click',togglePlay);
 function seek(d){ const v=$('#video'); if(!isNaN(v.duration)) v.currentTime=Math.min(v.duration,Math.max(0,v.currentTime+d)); showControls(); }
 const ASPECT_MODES=[{id:'fit',label:'⬛ Fit',cls:'mode-fit'},{id:'zoom',label:'⛶ Zoom',cls:'mode-zoom'},{id:'stretch',label:'↔ Stretch',cls:'mode-stretch'}];
 let aspectIdx=0;
 function cycleAspect(){ aspectIdx=(aspectIdx+1)%ASPECT_MODES.length; const m=ASPECT_MODES[aspectIdx]; const vw=$('#vwrap'); vw.classList.remove('mode-fit','mode-zoom','mode-stretch'); vw.classList.add(m.cls); $('#pAspect').textContent=m.label; showControls(); }
 $('#pAspect').addEventListener('click',cycleAspect);
-$('#pRew').addEventListener('click',()=>seek(-10));
-$('#pFwd').addEventListener('click',()=>seek(10));
-$('#scrub').addEventListener('click',e=>{ const v=$('#video'); const r=$('#scrub').getBoundingClientRect(); const p=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)); if(!isNaN(v.duration))v.currentTime=p*v.duration; });
+$('#pRew').addEventListener('click',()=>ffStart(-1));
+$('#pFwd').addEventListener('click',()=>ffStart(1));
+$('#scrub').addEventListener('click',e=>{ const v=$('#video'); ffStop(false); cancelSeekPreview(); const r=$('#scrub').getBoundingClientRect(); const p=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)); if(!isNaN(v.duration))v.currentTime=p*v.duration; });
 
 const fmtTime=s=>{ s=Math.max(0,Math.floor(s||0)); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60; return h>0?`${h}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`:`${m}:${String(ss).padStart(2,'0')}`; };
 const video=$('#video');
-video.addEventListener('timeupdate',()=>{ const v=video; if(isNaN(v.duration))return; const pct=(v.currentTime/v.duration)*100;
-  $('#scrubFill').style.width=pct+'%'; $('#scrubKnob').style.left=pct+'%'; $('#curTime').textContent=fmtTime(v.currentTime); $('#durTime').textContent=fmtTime(v.duration);
-  try{ if(v.buffered.length)$('#scrubBuf').style.width=((v.buffered.end(v.buffered.length-1)/v.duration)*100)+'%'; }catch{} });
+video.addEventListener('timeupdate',()=>{ if(seekPreview!==null) return; paintScrub(video.currentTime); });
+
+/* =========================================================================
+   SCRUBBING AND FAST-FORWARD
+   Left/Right on the scrub bar moves a PREVIEW marker and only commits the
+   real seek once you stop pressing, so a network stream rebuffers once
+   instead of once per press. Holding the D-pad accelerates the step.
+   The ◀◀ / ▶▶ buttons cycle 2x, 4x, 8x, 16x. Low rates play the video
+   faster; high rates step through it, which a network stream can keep up
+   with. OK, play/pause or a seek drops back to normal speed.
+   ========================================================================= */
+function paintScrub(t){
+  const v=video;
+  if(isNaN(v.duration)||!v.duration) return;
+  const pct=Math.min(100,Math.max(0,(t/v.duration)*100));
+  $('#scrubFill').style.width=pct+'%';
+  $('#scrubKnob').style.left=pct+'%';
+  $('#curTime').textContent=fmtTime(t);
+  $('#durTime').textContent=fmtTime(v.duration);
+  try{ if(v.buffered.length)$('#scrubBuf').style.width=((v.buffered.end(v.buffered.length-1)/v.duration)*100)+'%'; }catch(e){}
+}
+
+/* ---- preview scrubbing ---- */
+let seekPreview=null, seekCommitTimer=null, seekRuns=0, seekLastAt=0;
+function seekStepSize(){
+  const now=Date.now();
+  if(now-seekLastAt>700) seekRuns=0;
+  seekLastAt=now;
+  seekRuns++;
+  if(seekRuns<=3) return 10;
+  if(seekRuns<=8) return 30;
+  if(seekRuns<=16) return 60;
+  return 120;
+}
+function nudgeSeek(dir){
+  const v=video;
+  if(isNaN(v.duration)||!v.duration) return;
+  ffStop(false);
+  if(seekPreview===null) seekPreview=v.currentTime;
+  seekPreview=Math.min(v.duration, Math.max(0, seekPreview + dir*seekStepSize()));
+  paintScrub(seekPreview);
+  showControls();
+  clearTimeout(seekCommitTimer);
+  seekCommitTimer=setTimeout(commitSeek,450);
+}
+function commitSeek(){
+  clearTimeout(seekCommitTimer); seekCommitTimer=null;
+  if(seekPreview===null) return;
+  const t=seekPreview;
+  seekPreview=null; seekRuns=0;
+  try{ video.currentTime=t; }catch(e){}
+}
+function cancelSeekPreview(){
+  clearTimeout(seekCommitTimer); seekCommitTimer=null;
+  seekPreview=null; seekRuns=0;
+}
+
+/* ---- fast forward / rewind ---- */
+const FF_RATES=[2,4,8,16];
+let ffDir=0, ffIdx=-1, ffTimer=null, ffBadge=null, ffWasMuted=false;
+function ffActive(){ return ffDir!==0; }
+function ffShow(txt){
+  if(!ffBadge){
+    ffBadge=document.createElement('div');
+    ffBadge.id='ffBadge';
+    ffBadge.style.cssText='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);'+
+      'padding:14px 28px;border-radius:14px;background:rgba(0,0,0,.72);color:#e8f0e8;'+
+      'font-size:36px;font-weight:800;font-style:italic;letter-spacing:.02em;z-index:96;'+
+      'pointer-events:none;display:none';
+    $('#vwrap').appendChild(ffBadge);
+  }
+  ffBadge.textContent=txt;
+  ffBadge.style.display='block';
+}
+function ffHide(){ if(ffBadge) ffBadge.style.display='none'; }
+function ffStart(dir){
+  const v=video;
+  if(isNaN(v.duration)||!isFinite(v.duration)||!v.duration) return;   // live: nothing to race through
+  cancelSeekPreview();
+  if(!ffActive()) ffWasMuted=v.muted;
+  if(dir!==ffDir){ ffDir=dir; ffIdx=-1; }
+  ffIdx++;
+  if(ffIdx>=FF_RATES.length){ ffStop(true); return; }
+  ffApply();
+}
+function ffApply(){
+  const v=video, rate=FF_RATES[ffIdx];
+  clearInterval(ffTimer); ffTimer=null;
+  if(ffDir>0 && rate<=4){
+    v.muted=true;
+    try{ v.playbackRate=rate; }catch(e){}
+    v.play().catch(()=>{});
+  } else {
+    try{ v.playbackRate=1; }catch(e){}
+    v.muted=true;
+    v.pause();
+    ffTimer=setInterval(()=>{
+      const t=v.currentTime + ffDir*rate*0.4;
+      if(t<=0){ try{ v.currentTime=0; }catch(e){} ffStop(true); return; }
+      if(t>=v.duration-1){ try{ v.currentTime=Math.max(0,v.duration-1); }catch(e){} ffStop(true); return; }
+      try{ v.currentTime=t; }catch(e){}
+      paintScrub(v.currentTime);
+    },400);
+  }
+  ffShow((ffDir>0?'▶▶ ':'◀◀ ')+rate+'x');
+  showControls();
+}
+function ffStop(resume){
+  if(ffTimer){ clearInterval(ffTimer); ffTimer=null; }
+  if(!ffActive()){ ffHide(); return; }
+  const v=video;
+  ffDir=0; ffIdx=-1;
+  try{ v.playbackRate=1; }catch(e){}
+  v.muted=ffWasMuted;
+  ffHide();
+  if(resume!==false) v.play().catch(()=>{});
+}
 video.addEventListener('play',()=>{ $('#pPlay').textContent='❚❚'; clearInterval(saveTimer); saveTimer=setInterval(saveProgress,5000); });
 video.addEventListener('pause',()=>{ $('#pPlay').textContent='►'; saveProgress(); });
-video.addEventListener('ended',()=>{ localStorage.removeItem(progressKey()); });
+video.addEventListener('ended',()=>{ ffStop(false); cancelSeekPreview(); localStorage.removeItem(progressKey()); });
 
 /* resume */
 function saveProgress(){ if(!isVod)return; const v=video; if(!v.duration||isNaN(v.duration))return; if(v.currentTime<5||v.currentTime>v.duration-15){localStorage.removeItem(progressKey());return;} try{localStorage.setItem(progressKey(),JSON.stringify({t:v.currentTime,d:v.duration}));}catch{} }
