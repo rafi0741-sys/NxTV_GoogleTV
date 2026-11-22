@@ -221,6 +221,13 @@ document.addEventListener('keydown',e=>{
   else if(k==='ArrowDown'){ navigate('down'); e.preventDefault(); }
   else if(k==='Enter'||code===13){
     if(typing) return;
+    const vw=$('#vwrap');
+    if(vw.classList.contains('fs') && ffActive()){
+      ffStop(true); showControls(); e.preventDefault(); return;   // stop racing
+    }
+    if(vw.classList.contains('fs') && vw.classList.contains('hidebar')){
+      showControls(); e.preventDefault(); return;   // first press only wakes the bar
+    }
     activate(); e.preventDefault();
   }
 });
@@ -588,8 +595,9 @@ $('#scrub').addEventListener('click',e=>{
   // which used to compute position 0 and restart the film. detail is 0 for
   // those and 1+ for a real mouse click.
   if(!e.detail){
+    if(ffActive()){ ffStop(true); showControls(); return; }
     if(seekPreview!==null){ commitSeek(); return; }
-    togglePlay(); return;
+    showControls(); return;
   }
   ffStop(false); cancelSeekPreview();
   const r=$('#scrub').getBoundingClientRect();
@@ -1061,7 +1069,11 @@ function osAppendMenu(list){
   const what = t.season > 0 ? `${t.query} S${t.season}E${t.episode}` : (t.query || '—');
   osItem(list, `🔍 Search “${what}”`, () => osRunSearch(t));
   osItem(list, '✎ Type a title…', () => osAskQuery(t));
-  osItem(list, `🌐 Language: ${osLang().toUpperCase()}`, () => { osCycleLang(); openTrackPop('caps'); });
+  const langRow = osItem(list, `🌐 Language: ${osLang().toUpperCase()}`, () => {
+    osCycleLang();
+    langRow.textContent = `🌐 Language: ${osLang().toUpperCase()}`;
+    setFocus(langRow);
+  });
 }
 function osAskQuery(t){
   const list = $('#tpopList');
@@ -1089,7 +1101,11 @@ function osAskQuery(t){
     if(e.key === 'Enter' || e.keyCode === 13){ e.preventDefault(); go(); }
   });
   osItem(list, '🔍 Search', go);
-  osItem(list, `🌐 Language: ${osLang().toUpperCase()}`, () => { osCycleLang(); osAskQuery({ ...t, query: inp.value }); });
+  const langRow2 = osItem(list, `🌐 Language: ${osLang().toUpperCase()}`, () => {
+    osCycleLang();
+    langRow2.textContent = `🌐 Language: ${osLang().toUpperCase()}`;
+    setFocus(langRow2);
+  });
   osItem(list, '↩ Back', () => openTrackPop('caps'));
   setTimeout(() => setFocus(inp), 60);
 }
