@@ -97,7 +97,7 @@ jobs:
           npm install @capacitor/app@^6.0.2
 
       - name: Add Android platform
-        run: npx cap add android
+        run: npx cap add android && python3 scripts/add_vlc_plugin.py android
 
       - name: Generate NXTV launcher icons
         run: |
