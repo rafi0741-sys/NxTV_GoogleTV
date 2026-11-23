@@ -53,7 +53,7 @@ jobs:
       - name: Inject the OpenSubtitles API key
         env:
           OS_KEY: ${{ secrets.OPENSUBTITLES_API_KEY }}
-        run: python3 scripts/inject_key.py
+        run: python3 scripts/inject_key.py && sed -i "s|__BUILD_STAMP__|$(date -u '+%d %b %H:%M UTC') · ${GITHUB_SHA:0:7}|" www/app.js && grep -o "BUILD_STAMP = .*" www/app.js
 
       - name: Fetch HLS.js into www
         run: |
